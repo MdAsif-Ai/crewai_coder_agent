@@ -1,104 +1,155 @@
-# Coder Crew – Multi‑Agent AI Code‑Generation Framework
+# Coder Crew
 
-> **TL;DR** – A ready‑to‑run CrewAI project that lets you describe an assignment in plain English, and a fleet of AI agents will write, run, and validate Python code inside an isolated Docker sandbox.
-
----
-
-## What This Project Does
-
-- **Prompt‑to‑code**: Accept a natural‑language *assignment* (e.g. "calculate the first 1 000 000 terms of the Leibniz series and multiply by 4").
-- **CrewAI orchestrator**: A *Crew* with a single **Coder** agent that uses the **sandbox_tools** toolkit.
-- **Docker‑sandbox execution**: All generated Python files are stored in `sandbox/` and run inside a temporary `python:3.13‑slim` container, guaranteeing no side‑effects on the host.
-- **Result aggregation**: The agent returns a markdown summary and the final script output, written to `output/solution.md`.
-
-The whole flow is **self‑contained** – you only need a virtual‑environment with the dependencies listed in `pyproject.toml`.
+An autonomous Python coding assistant built with **CrewAI** that writes, inspects, and executes Python programs inside an isolated **Docker sandbox**. Given a natural-language assignment, the agent authors code in a dedicated sandbox workspace, runs it inside an ephemeral `python:3.13-slim` container, verifies the output, and saves a structured Markdown report.
 
 ---
 
-## How It Works (Diagram)
+## Architecture Overview
+
+![Coder Crew Architecture](assets/architecture.jpg)
+
+### Execution Pipeline
 
 ```mermaid
-flowchart TD
-    A[User runs `coder run`] --> B[main.py loads assignment]
-    B --> C[Coder Crew instantiated]
-    C --> D[Agent "coder" reads assignment]
-    D --> E[Agent calls sandbox_tools:
-        - write_sandbox_file()
-        - run_sandbox_python()
-        - read_sandbox_file()]
-    E --> F[Docker container runs the script]
-    F --> G[Agent receives stdout
-        and writes summary]
-    G --> H[Output written to `output/solution.md`]
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style H fill:#9f9,stroke:#333,stroke-width:2px
+flowchart LR
+    A["User / CLI Entrypoint"] --> B["Load Assignment Input"]
+    B --> C["Coder Crew (Sequential Process)"]
+    C --> D["Coder Agent (openai/gpt-5.4-mini)"]
+    D --> E["Write Code to Sandbox"]
+    E --> F["Run in Docker (python:3.13-slim)"]
+    F --> G["Read Stdout and Verify Output"]
+    G --> H["Save Summary to output/solution.md"]
 ```
 
 ---
 
-## Core Components
+## How It Works
 
-| Component | Role | Key Files |
-|-----------|------|-----------|
-| **Crew definition** | Sets up the agent and the task pipeline | `src/coder/crew.py` |
-| **Agent configuration** | Describes the coder’s purpose, goal and LLM | `src/coder/config/agents.yaml` |
-| **Task configuration** | Defines the *coding_task* that the agent must perform | `src/coder/config/tasks.yaml` |
-| **Sandbox toolkit** | Exposes safe file‑IO and Docker‑run helpers to the agent | `src/coder/tools/sandbox_tools.py` |
-| **Entry point** | Parses the assignment and kicks off the crew | `src/coder/main.py` |
-| **Docker sandbox** | Isolated runtime for generated scripts (`sandbox/`) | `src/coder/tools/sandbox_tools.py` (Docker command) |
+1. **Assignment Input**: `src/coder/main.py` defines an `assignment` string (by default, computing the first 1,000,000 terms of the Leibniz series `1 - 1/3 + 1/5 - 1/7 + ...` multiplied by `4` to approximate $\pi$) and passes it to the crew via `kickoff(inputs={'assignment': assignment})`.
+2. **Crew Orchestration**: `src/coder/crew.py` defines the `@CrewBase` class `Coder`, which wires together the `coder` agent and `coding_task` using `Process.sequential` with `verbose=True` and `tracing=True`.
+3. **Agent & Task Configuration**:
+   - **Agent (`coder`)**: Configured in `src/coder/config/agents.yaml` as a *Python Developer* powered by `openai/gpt-5.4-mini`, equipped with `sandbox_tools`.
+   - **Task (`coding_task`)**: Configured in `src/coder/config/tasks.yaml` to write and run Python code in the sandbox and output a final summary to `output/solution.md`.
+4. **Isolated Docker Execution**: Every script execution runs in a fresh container (`docker run --rm`) using `python:3.13-slim` with the local `sandbox/` folder mounted at `/workspace` and a 60-second timeout.
+
+### Sandbox Interaction Sequence
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant M as main.py
+    participant C as Coder Agent
+    participant T as Sandbox Tools
+    participant D as Docker (python:3.13-slim)
+
+    U->>M: Run crewai run or coder
+    M->>C: kickoff(assignment)
+    C->>T: List Sandbox Files
+    T-->>C: Current files or empty
+    C->>T: Write Sandbox File (solution.py)
+    T-->>C: Confirmation
+    C->>T: Run Sandbox Python File (solution.py)
+    T->>D: docker run --rm -v sandbox:/workspace
+    D-->>T: stdout (60s timeout)
+    T-->>C: Execution output
+    C-->>M: Final summary and result
+    M-->>U: Written to output/solution.md
+```
 
 ---
 
-## Getting Started
+## Sandbox Tools Reference
 
-1. **Create a virtual environment** (the project already contains a helper script):
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
-2. **Install the project in editable mode** (pulls CrewAI and all extras):
-   ```bash
-   pip install -e .
-   ```
-3. **Run the crew** – the default assignment is baked into `main.py`:
-   ```bash
-   coder   # or: python -m coder.main run
-   ```
-   The agent will write `sandbox/solution.py`, execute it in Docker, and dump a nicely formatted report to `output/solution.md`.
+All tools exposed to the agent in `src/coder/tools/sandbox_tools.py` opt out of CrewAI's default tool caching (`cache_function` returns `False`) so the agent never reads stale filesystem or execution state.
 
-### Custom Assignments
+| Tool Name | Function | Description |
+| :--- | :--- | :--- |
+| **List Sandbox Files** | `list_sandbox_files()` | Returns a sorted, newline-separated list of filenames in `sandbox/`, or indicates that the sandbox is empty. |
+| **Read Sandbox File** | `read_sandbox_file(filename)` | Reads and returns the text contents of a file in `sandbox/`, or reports if it does not exist. |
+| **Write Sandbox File** | `write_sandbox_file(filename, content)` | Writes or overwrites a file in `sandbox/` and returns the character count written. |
+| **Run Sandbox Python File** | `run_sandbox_python(filename)` | Executes the specified Python file inside `python:3.13-slim` with `sandbox/` mounted to `/workspace`, returning `stdout` (60s timeout). |
 
-Edit the `assignment` variable in `src/coder/main.py` or pass a JSON payload via the *trigger* helper:
+---
+
+## Prerequisites
+
+- **Python**: `>=3.10, <3.14`
+- **uv** (recommended) or `pip` for dependency management (`crewai[tools]==1.14.4`)
+- **Docker**: Docker Engine installed and accessible to the current user (the `python:3.13-slim` image will be pulled automatically on first run)
+- **API Key**: An `OPENAI_API_KEY` set in your environment or `.env` file (required by `openai/gpt-5.4-mini`)
+
+---
+
+## Setup & Installation
+
+Using `uv` (recommended):
+
 ```bash
-python -m coder.main run_with_trigger '{"assignment": "Scrape the titles of the latest 5 posts on Hacker News"}'
+uv sync
 ```
-The crew will automatically adapt to the new request.
+
+Or using a standard virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Add your OpenAI API key to a `.env` file in the project root:
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+```
 
 ---
 
-## Extending the Project
+## Running the Project
 
-- **Add more agents**: Create additional entries in `agents.yaml` and corresponding tasks in `tasks.yaml`. Use the same `sandbox_tools` or write new tool modules.
-- **Custom tools**: Follow the pattern in `sandbox_tools.py`. Remember to set `cache_function = lambda *_, **__: False` for any state‑changing tool.
-- **Testing**: Run `crewai test 5 gpt-4o-mini` to execute the crew multiple times with a cheaper model and spot regressions.
-- **Docker image tweaks**: Change the base image in `run_sandbox_python()` if you need extra libraries (e.g. `python:3.13‑slim‑bullseye`).
+### Default Run
+
+Execute the crew using the CrewAI CLI or the project scripts defined in `pyproject.toml`:
+
+```bash
+crewai run
+```
+
+Alternatively, with `uv` or the virtual environment:
+
+```bash
+uv run coder
+# or
+uv run run_crew
+```
+
+After execution completes:
+- Generated Python code is saved in `sandbox/` (for example, `sandbox/solution.py`).
+- The agent's summary and execution result are written to `output/solution.md`.
+
+### Customizing the Assignment
+
+Update the `assignment` variable in `src/coder/main.py` to give the agent a different coding task, or customize the agent's role, goal, backstory, and LLM model in `src/coder/config/agents.yaml`.
+
+### Additional CLI Entrypoints
+
+`pyproject.toml` exposes standard CrewAI lifecycle scripts:
+
+| Command | Entrypoint | Purpose |
+| :--- | :--- | :--- |
+| `coder` / `run_crew` | `coder.main:run` | Run the crew with the configured assignment |
+| `train` | `coder.main:train` | Train the crew over `n_iterations` |
+| `replay` | `coder.main:replay` | Replay execution from a specific `task_id` |
+| `test` | `coder.main:test` | Evaluate the crew over `n_iterations` |
+| `run_with_trigger` | `coder.main:run_with_trigger` | Kick off the crew with a JSON trigger payload |
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely Cause | Fix |
-|---------|--------------|-----|
-| `ModuleNotFoundError: crewai` | Dependencies not installed or virtual‑env not activated | `source .venv/bin/activate && pip install -e .` |
-| Docker command hangs | Docker not installed or current user lacks permission to run Docker | Install Docker Engine and add the user to the `docker` group |
-| Sandbox file missing | Agent failed to write file (tool error) | Verify `write_sandbox_file` returns a success message; check the agent’s LLM response for malformed filenames |
-| Empty `output/solution.md` | Agent never reached the *summary* step | Enable `verbose=True` in `crew.py` to see detailed agent logs |
+| Issue | Cause | Solution |
+| :--- | :--- | :--- |
+| `ModuleNotFoundError: No module named 'crewai'` | Dependencies are not installed or the virtual environment is not active | Run `uv sync` or activate `.venv` and run `pip install -e .` |
+| Docker permission or daemon error | Docker daemon is not running or user lacks permission | Start Docker and ensure your user is in the `docker` group |
+| Empty output from `run_sandbox_python` | Script raised an exception to `stderr` or printed nothing | Check `stderr` or ensure the script prints its final result to `stdout` |
+| Authentication error from LLM | Missing or invalid `OPENAI_API_KEY` | Verify `OPENAI_API_KEY` in `.env` or your shell environment |
 
----
-
-
-## Want a Visual Demo?
-
-Run the crew and then open the generated `output/solution.md` in the Antigravity markdown preview – it will render the code blocks, the Docker stdout, and the summary side‑by‑side.
-
-Enjoy building AI‑driven coding crews! 🎉

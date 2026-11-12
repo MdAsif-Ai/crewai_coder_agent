@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 
 
-SANDBOX_DIR = Path(__file__).parents[4] / "sandbox"
+SANDBOX_DIR = Path(__file__).parents[3] / "sandbox"
 SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
 
 @tool("List Sandbox Files")
